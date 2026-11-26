@@ -37,14 +37,6 @@ Request -> RateLimitFilter -> RateLimiter (one of three algorithms)
 
 Limit: 3 requests per 10 s (token bucket: capacity 3, one token per 3 s). Requests at seconds 8, 9, 9.5, 10.5, 11, 12:
 
-Output of the comparison test (moments in ms, ✅ allowed, ❌ rejected):
-
-```
-token-bucket-limiter:   8000✅ 9000✅ 9500✅ 10500❌ 11000✅ 12000❌
-sliding-window-limiter: 8000✅ 9000✅ 9500✅ 10500❌ 11000❌ 12000❌
-fixed-window-limiter:   8000✅ 9000✅ 9500✅ 10500✅ 11000✅ 12000✅
-```
-
 | Request at | Fixed window | Sliding window | Token bucket |
 |---|---|---|---|
 | 8 | allowed | allowed | allowed |
@@ -56,31 +48,65 @@ fixed-window-limiter:   8000✅ 9000✅ 9500✅ 10500✅ 11000✅ 12000✅
 
 Fixed window lets 6 requests through in 4 seconds because the counter resets at the window boundary.
 
-TODO: more scenarios, memory comparison, measured numbers.
+### Output of the comparison test
+
+Moments in milliseconds, ✅ allowed, ❌ rejected.
+
+```
+token-bucket-limiter:   8000 ✅ 16000 ✅ 17000 ✅ 18000 ✅ 19000 ✅ 20000 ❌
+sliding-window-limiter: 8000 ✅ 16000 ✅ 17000 ✅ 18000 ❌ 19000 ✅ 20000 ❌
+fixed-window-limiter:   8000 ✅ 16000 ✅ 17000 ✅ 18000 ✅ 19000 ❌ 20000 ✅
+-------------------
+token-bucket-limiter:   8000 ✅ 9000 ✅ 9500 ✅ 10500 ❌ 11000 ✅ 12000 ❌
+sliding-window-limiter: 8000 ✅ 9000 ✅ 9500 ✅ 10500 ❌ 11000 ❌ 12000 ❌
+fixed-window-limiter:   8000 ✅ 9000 ✅ 9500 ✅ 10500 ✅ 11000 ✅ 12000 ✅
+-------------------
+token-bucket-limiter:   1000 ✅ 2000 ✅ 3000 ✅ 4000 ✅ 5000 ❌ 12000 ✅
+sliding-window-limiter: 1000 ✅ 2000 ✅ 3000 ✅ 4000 ❌ 5000 ❌ 12000 ✅
+fixed-window-limiter:   1000 ✅ 2000 ✅ 3000 ✅ 4000 ❌ 5000 ❌ 12000 ✅
+-------------------
+token-bucket-limiter:   0 ✅ 0 ✅ 0 ✅ 7000 ✅ 8000 ✅ 8500 ❌ 9000 ✅
+sliding-window-limiter: 0 ✅ 0 ✅ 0 ✅ 7000 ❌ 8000 ❌ 8500 ❌ 9000 ❌
+fixed-window-limiter:   0 ✅ 0 ✅ 0 ✅ 7000 ❌ 8000 ❌ 8500 ❌ 9000 ❌
+-------------------
+token-bucket-limiter:   1000 ✅ 100000 ✅ 100000 ✅ 100000 ✅ 100000 ❌
+sliding-window-limiter: 1000 ✅ 100000 ✅ 100000 ✅ 100000 ✅ 100000 ❌
+fixed-window-limiter:   1000 ✅ 100000 ✅ 100000 ✅ 100000 ✅ 100000 ❌
+```
+
+TODO: memory comparison, measured numbers, conclusions about when each algorithm fits.
+
 
 ## Thread safety
 
-Test: 100 threads call `allowRequest` for the same client at the same moment (limit 3, `FixedWindowRateLimiter`), repeated 20 times. Each number below is how many requests were allowed in one repetition. The correct result is never more than 3.
+Test: 100 threads call `allowRequest` for the same client at the same moment (limit 3), repeated 20 times with a fresh limiter each time. Each number below is how many requests were allowed in one repetition. The correct result is never more than 3.
 
-**Before the fix, no artificial delay**
+### Before the fix, no artificial delay (all three algorithms)
 
-Code under test: plain `HashMap`, no synchronisation. 19 runs correct, 1 run broken (a real race condition).
-
-```
-3 3 3 4 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3
-```
-
-**Before the fix, with `Thread.sleep(1)` between the check and the update**
-
-Code under test: the same, plus a temporary `Thread.sleep(1)` inside `allowRequest` to widen the race window, so the bug shows up every time. Every thread passes the check before any of them updates the counter.
+Code under test: plain `HashMap`, unsynchronised per-client state.
 
 ```
-100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100
+fixed-window:   [4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+sliding-window: [3, 3, 3, 10, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+token-bucket:   [3, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
 ```
 
-**After the fix**
+All three break the limit, but only in some repetitions: fixed window allowed 4 requests once, sliding window allowed 10 once, token bucket allowed 4 once (1 of 20 repetitions each). The rest looked correct. This is typical for a race condition: it depends on thread timing, so one green run proves nothing.
 
-TODO
+
+### Before the fix, with `Thread.sleep(1)` between the check and the update
+
+Code under test: the same, plus a temporary `Thread.sleep(1)` inside `FixedWindowRateLimiter.allowRequest` to widen the race window, so the bug shows up every time. Every thread passes the check before any of them updates the state.
+
+```
+fixed-window: [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100]
+```
+
+The delay was used only on the fixed window, to illustrate how a wider race window makes the failure deterministic. The other two algorithms were reproduced without any delay (see above).
+
+### After the fix
+
+TODO: describe the fix and show the same runs (without delay, and with `Thread.sleep(1)`). Expected: exactly 3 in every repetition.
 
 ## Running
 

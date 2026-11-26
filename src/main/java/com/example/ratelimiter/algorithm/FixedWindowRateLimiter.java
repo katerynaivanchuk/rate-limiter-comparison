@@ -38,11 +38,6 @@ public class FixedWindowRateLimiter implements RateLimiter {
             WindowCounter counter = clientWindows.get(client);
             if((counter.startWindow / mlsLimit) == (moment / mlsLimit)) {
                 if(counter.requestCounter < requestLimit) {
-                    try {
-                        Thread.sleep(1);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
                     counter.requestCounter++;
                     return true;
                 }
